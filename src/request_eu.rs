@@ -1,7 +1,6 @@
 use std::fmt;
 
 use reqwest::Client;
-use tokio::main;
 
 use quick_xml::de::{from_str, DeError};
 use serde::Deserialize;
@@ -10,7 +9,6 @@ use serde::Deserialize;
 pub enum Error {
     ReqwestError(reqwest::Error),
     XmlError(DeError),
-    ElementNotFoundError,
 }
 
 impl fmt::Display for Error {
@@ -18,7 +16,6 @@ impl fmt::Display for Error {
         match self {
             Error::ReqwestError(err) => write!(f, "reqwest error: {}", err),
             Error::XmlError(err) => write!(f, "XML deserialization error: {}", err),
-            Error::ElementNotFoundError => write!(f, "expected element not found"),
         }
     }
 }
@@ -38,7 +35,7 @@ impl From<DeError> for Error {
 }
 
 #[derive(Deserialize, Debug)]
-struct HeaderElement {
+pub struct HeaderElement {
     #[serde(rename = "numHits")]
     num_hits: usize,
     #[serde(rename = "totalHits")]
@@ -47,59 +44,124 @@ struct HeaderElement {
 }
 
 #[derive(Deserialize)]
-struct ResultElement {
+pub struct ResultElement {
     header: HeaderElement,
 }
 
-#[derive(Deserialize, Debug)]
-struct ArticleElement {
-    title: String,
-    relations: Vec<RelationsElement>,
+#[derive(Deserialize, Debug, Clone)]
+pub struct Identifiers {
+    issn: String,
+    #[serde(rename = "catalogueNumber")]
+    catalogue_number: String,
+    #[serde(rename = "cellarId")]
+    cellar_id: String,
+    issue: String,
+}
+
+impl Identifiers {
+    pub fn issue(&self) -> &str {
+        &self.issue
+    }
 }
 
 #[derive(Deserialize, Debug)]
-struct Association {
+pub struct Article {
+    title: String,
+    relations: Vec<RelationsElement>,
+    identifiers: Identifiers,
+}
+
+impl Article {
+    pub fn identifiers(&self) -> &Identifiers {
+        &self.identifiers
+    }
+
+    /// Returns a list of weblinks found in any of the associations
+    pub fn weblinks(&self) -> Vec<&WebLinkElement> {
+        self.relations
+            .iter()
+            .flat_map(|relation| &relation.associations)
+            .flat_map(|association| &association.weblinks)
+            .collect()
+    }
+}
+
+#[derive(Deserialize, Debug)]
+pub struct Association {
     #[serde(rename = "webLink")]
     weblinks: Vec<WebLinkElement>,
 }
 
 #[derive(Deserialize, Debug)]
-struct RelationsElement {
+pub struct RelationsElement {
     associations: Vec<Association>,
 }
 
-#[derive(Deserialize, Debug)]
-struct WebLinkElement {
+#[derive(Deserialize, Debug, Clone)]
+pub struct WebLinkElement {
     #[serde(rename = "type")]
-    typ: String,
+    pub typ: String,
     title: String,
     id: String,
     language: String,
     #[serde(rename = "physUrl")]
-    phys_url: String,
+    pub phys_url: String,
 }
 
 #[derive(Deserialize, Debug)]
-struct Hit {
+pub struct Hit {
     score: f64,
-    article: ArticleElement,
+    article: Article,
+}
+
+impl Hit {
+    pub fn article(&self) -> &Article {
+        &self.article
+    }
 }
 
 #[derive(Deserialize, Debug)]
-struct HitsElement {
+pub struct HitsElement {
     #[serde(rename = "hit")]
     hits: Vec<Hit>,
 }
 
 #[derive(Deserialize)]
-struct SearchResponse {
+pub struct SearchResponse {
     result: ResultElement,
     hits: HitsElement,
 }
 
+impl SearchResponse {
+    pub fn total_hits(&self) -> usize {
+        self.result.header.total_hits
+    }
+
+    /// Calculates the number of total pages to request with the current per-page limit to receive
+    /// all the hits
+    pub fn num_pages(&self) -> usize {
+        let total_hits = self.total_hits();
+        // FIXME: Don't use hardcoded size of 10!!!
+
+        if total_hits % 10 == 0 {
+            total_hits / 10
+        } else {
+            (total_hits / 10) + 1
+        }
+    }
+
+    pub fn hits(&self) -> &Vec<Hit> {
+        self.hits.hits.as_ref()
+    }
+
+    pub fn articles(&self) -> Vec<&Article> {
+        self.hits().iter().map(|x| x.article()).collect()
+    }
+}
+
 /// Searches the CORDIS repository for the given query, which is an SQL-like format
-pub async fn search(query: &str, page: usize, limit: usize) -> Result<(), Error> {
-    let client = reqwest::Client::new();
+pub async fn search(query: &str, page: usize, limit: usize) -> Result<SearchResponse, Error> {
+    let client = Client::new();
 
     let resp = client
         .get("https://cordis.europa.eu/search/en")
@@ -114,13 +176,7 @@ pub async fn search(query: &str, page: usize, limit: usize) -> Result<(), Error>
         .await?;
 
     let text = resp.text().await?;
-    //let text = std::fs::read_to_string("data/page_1.xml").unwrap();
-
     let result: SearchResponse = from_str(&text)?;
 
-    for hit in result.hits.hits {
-        println!("result: {:?}", hit);
-    }
-
-    Ok(())
+    Ok(result)
 }
