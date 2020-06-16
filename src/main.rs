@@ -1,4 +1,5 @@
 use std::collections::VecDeque;
+use std::path::Path;
 
 use indicatif::{ProgressBar, ProgressStyle};
 use log::debug;
@@ -12,9 +13,12 @@ struct Article {
     url: String,
 }
 
-async fn download_article_pdf(article: Article) -> Result<(), Box<dyn std::error::Error>> {
+async fn download_article_pdf<P: AsRef<Path>>(
+    article: Article,
+    output_path: P,
+) -> Result<(), Box<dyn std::error::Error>> {
     let mut res = reqwest::get(&article.url).await?;
-    let mut file = File::create(&format!("{}.pdf", article.issue)).await?;
+    let mut file = File::create(&output_path).await?;
 
     while let Some(chunk) = res.chunk().await? {
         file.write_all(&chunk).await?;
@@ -34,10 +38,13 @@ async fn get_magazines_page(page: usize) -> Result<request_eu::SearchResponse, r
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     env_logger::init();
 
+    let output_dir = Path::new("./magazines");
+
+    std::fs::create_dir(output_dir)?;
+
     let pb = ProgressBar::new(0);
-    let sty = ProgressStyle::default_bar()
-        .template("[{elapsed_precise}] {bar:40.cyan/blue} {pos:>7}/{len:7} {msg}")
-        .progress_chars("##-");
+    let sty =
+        ProgressStyle::default_bar().template("[{elapsed_precise}] {bar} {pos:>7}/{len:7} {msg}");
 
     pb.set_style(sty.clone());
     pb.set_message("Downloading search pages");
@@ -75,12 +82,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     pb.set_length(queue.len() as u64);
 
     while let Some(article) = queue.pop_front() {
+        let output_path = output_dir.join(&format!("{}.pdf", article.issue));
+
         pb.inc(1);
-        pb.set_message(&format!("{}.pdf", article.issue));
+        pb.set_message(output_path.to_str().unwrap());
 
-        debug!("Downloading {} to `{}.pdf'", article.url, article.issue);
+        if output_path.exists() {
+            continue;
+        }
 
-        download_article_pdf(article).await?;
+        debug!(
+            "Downloading {} to `{}'",
+            article.url,
+            output_path.to_str().unwrap()
+        );
+
+        download_article_pdf(article, output_path).await?;
     }
 
     pb.finish_with_message("Done");
